@@ -1,0 +1,148 @@
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const fs = require('fs');
+const path = require('path');
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+
+const LOG_FILE = path.join(__dirname, 'logins.txt');
+
+// Ensure the file exists
+if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, '');
+
+function readLogs() {
+  try {
+    const raw = fs.readFileSync(LOG_FILE, 'utf8').trim();
+    if (!raw) return [];
+    return raw.split('\n').map(line => {
+      try { return JSON.parse(line); } catch { return null; }
+    }).filter(Boolean).reverse(); // newest first
+  } catch { return []; }
+}
+
+function appendLog(entry) {
+  fs.appendFileSync(LOG_FILE, JSON.stringify(entry) + '\n');
+}
+
+// --- Login page (for your phone) ---
+app.get('/login', (req, res) => {
+  res.send(`<!DOCTYPE html><html><head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Demo Login</title>
+  <style>
+    body{font-family:system-ui;background:#0f1115;color:#e6e8ee;display:grid;place-items:center;min-height:100vh;margin:0;padding:20px}
+    .card{background:#1a1d24;padding:24px;border-radius:16px;width:100%;max-width:380px;border:1px solid #2a2f3a}
+    .banner{background:#3a2a00;color:#ffd27a;padding:8px;border-radius:8px;font-size:13px;text-align:center;margin-bottom:16px}
+    label{display:block;font-size:13px;color:#9aa3b2;margin:14px 0 6px}
+    input{width:100%;padding:12px;background:#12151c;border:1px solid #2a2f3a;border-radius:10px;color:#fff;font-size:15px;box-sizing:border-box}
+    button{width:100%;margin-top:18px;padding:12px;background:#4f8cff;color:#fff;border:none;border-radius:10px;font-weight:600;font-size:15px}
+    .status{margin-top:12px;text-align:center;font-size:13px;color:#6ee7a8}
+  </style></head><body>
+  <div class="card">
+    <div class="banner">DEMO ONLY — do not enter real credentials</div>
+    <form id="f">
+      <label>Username</label>
+      <input id="u" autocomplete="off" required>
+      <label>Password</label>
+      <input id="p" type="password" autocomplete="off" required>
+      <button>Sign in (fake)</button>
+    </form>
+    <div class="status" id="s"></div>
+  </div>
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    document.getElementById('f').addEventListener('submit', e => {
+      e.preventDefault();
+      const username = document.getElementById('u').value;
+      const password = document.getElementById('p').value;
+      socket.emit('login-submit', { username, password, time: new Date().toLocaleString() });
+      document.getElementById('s').textContent = '✔ Sent (demo only)';
+      document.getElementById('f').reset();
+    });
+  </script>
+  </body></html>`);
+});
+
+// --- Checker page (for your laptop) ---
+app.get('/checker', (req, res) => {
+  res.send(`<!DOCTYPE html><html><head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Checker</title>
+  <style>
+    body{font-family:system-ui;background:#0f1115;color:#e6e8ee;padding:24px;margin:0}
+    h1{font-size:20px}
+    .row{background:#1a1d24;border:1px solid #2a2f3a;padding:12px;border-radius:10px;margin-bottom:10px;font-size:14px;word-break:break-word}
+    .muted{color:#9aa3b2;font-size:12px}
+    .empty{color:#9aa3b2}
+    a{color:#4f8cff}
+    .btn{display:inline-block;margin-bottom:14px;padding:10px 16px;background:#4f8cff;color:#fff;border:none;border-radius:8px;font-weight:600;cursor:pointer;text-decoration:none}
+    .btn.danger{background:#b33}
+  </style></head><body>
+  <h1>Live submissions</h1>
+  <p class="muted">Open <code>/login</code> on your phone. · <a href="/logs">View raw file</a></p>
+  <a href="/download" class="btn">Download logins.txt</a>
+  <button id="clear" class="btn danger">Clear log</button>
+  <div id="out" class="empty">Waiting...</div>
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    const out = document.getElementById('out');
+    const items = [];
+    const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    function render() {
+      if (!items.length) { out.className='empty'; out.textContent='Waiting...'; return; }
+      out.className = '';
+      out.innerHTML = items.map(i => \`
+        <div class="row">
+          <div><b>User:</b> \${esc(i.username)}</div>
+          <div><b>Pass:</b> \${esc(i.password)}</div>
+          <div class="muted">\${esc(i.time)}</div>
+        </div>\`).join('');
+    }
+    socket.on('history', list => { items.length = 0; items.push(...list); render(); });
+    socket.on('login-submit', data => { items.unshift(data); render(); });
+    socket.on('log-cleared', () => { items.length = 0; render(); });
+    document.getElementById('clear').addEventListener('click', () => {
+      if (confirm('Clear all logins?')) socket.emit('clear-log');
+    });
+  </script>
+  </body></html>`);
+});
+
+// --- Raw log viewer ---
+app.get('/logs', (req, res) => {
+  const logs = readLogs();
+  if (!logs.length) return res.type('text/plain').send('No logins yet.');
+  res.type('text/plain').send(
+    logs.map(l => `[${l.time}] ${l.username} : ${l.password}`).join('\n')
+  );
+});
+
+// --- Download logins.txt ---
+app.get('/download', (req, res) => {
+  res.download(LOG_FILE, 'logins.txt');
+});
+
+// --- Relay + save to file ---
+io.on('connection', socket => {
+  socket.emit('history', readLogs());
+  socket.on('login-submit', data => {
+    appendLog(data);
+    socket.broadcast.emit('login-submit', data);
+  });
+  socket.on('clear-log', () => {
+    fs.writeFileSync(LOG_FILE, '');
+    io.emit('log-cleared');
+  });
+});
+
+app.get('/', (req, res) => res.redirect('/checker'));
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log('Listening on ' + PORT));
